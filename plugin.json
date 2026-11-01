@@ -1,0 +1,22 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.github.mickew.kicad2cnc",
+  "name": "KiCad to CNC",
+  "description": "Export Gerber and Excellon files and generate per-tool, GRBL-oriented CNC files with pcb2gcode.",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.11"
+  },
+  "actions": [
+    {
+      "identifier": "board-info",
+      "name": "KiCad to CNC",
+      "description": "Export the open PCB and optionally generate CNC toolpaths for review",
+      "show-button": true,
+      "scopes": ["pcb"],
+      "entrypoint": "launch.py",
+      "icons-light": ["icons\\cnc.png"],
+      "icons-dark": ["icons\\cnc.png"]
+    }
+  ]
+}
