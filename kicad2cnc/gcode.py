@@ -1,6 +1,5 @@
 import os
 import re
-import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +29,24 @@ def layer_file(job: Path, layer: str) -> Path | None:
     if len(matches) > 1:
         raise ExportError(f"Multiple Gerbers identify layer {layer}.")
     return matches[0] if matches else None
+
+
+def _cam_drill_text(source: Path) -> str:
+    data = source.read_text(encoding="utf-8")
+    coordinate = r"X[+-]?\d+(?:\.\d+)?Y[+-]?\d+(?:\.\d+)?"
+    # Older Gerbv understands G85 slots, but not KiCad's equivalent route blocks.
+    route = (
+        rf"^G00({coordinate})[ \t]*\n"
+        rf"M15[ \t]*\nG01({coordinate})[ \t]*\nM16[ \t]*\nG05[ \t]*(?=\n|$)"
+    )
+    data = re.sub(route, r"\1G85\2", data, flags=re.MULTILINE)
+    if re.search(r"^(?:G0[0123]|M1[56])", data, re.MULTILINE):
+        raise ExportError(
+            f"Unsupported Excellon routing in {source.name}. "
+            "Only KiCad straight oval-slot route blocks are supported; "
+            "use export-only mode for other routed geometry."
+        )
+    return data
 
 
 def generate_gcode(
@@ -113,6 +130,7 @@ def generate_gcode(
             raise ExportError("Outline cutting requires the Edge.Cuts Gerber.")
         routing["outline"] = str(source)
     outputs: list[Path] = []
+    has_slots = False
 
     def convert(name: str, inputs: dict[str, str | float | int], options: dict[str, str | float | int]) -> None:
         directory = cam_root / name
@@ -123,7 +141,9 @@ def generate_gcode(
             extension = ".drl" if kind == "drill" else ".gbr"
             filename = kind + extension
             if kind == "drill":
-                shutil.copyfile(str(source), directory / filename)
+                (directory / filename).write_text(
+                    _cam_drill_text(Path(str(source))), encoding="utf-8",
+                )
             else:
                 # Gerbv in the Windows build predates X2. Attributes do not affect geometry.
                 data = Path(str(source)).read_text(encoding="utf-8")
@@ -180,11 +200,12 @@ def generate_gcode(
         if not drills:
             raise ExportError("No Excellon files found for drilling.")
         for index, source in enumerate(drills):
-            data = source.read_text(encoding="utf-8")
-            if re.search(r"^G0[01]X", data, re.MULTILINE):
-                raise ExportError(
-                    f"Routed Excellon slots are not supported by this CAM pipeline: {source.name}. "
-                    "Use export-only mode and a CAM tool that supports routed slots."
+            data = _cam_drill_text(source)
+            if "G85" in data:
+                has_slots = True
+                report(
+                    f"Converting oval slots in {source.name} using G85 CAM input. "
+                    "Review slot chain-drilling or mill-drilling paths before machining.\n"
                 )
             # KiCad emits header-only files when a hole category is absent.
             if not re.search(r"^X[+-]?\d", data, re.MULTILINE):
@@ -261,7 +282,13 @@ def generate_gcode(
         "board drill/mill-drill files, never in addition. Registration holes stay separate.\n"
         if settings.combined_drilling else ""
     )
-    warning = WARNING + mode_warning + combined_warning
+    slot_warning = (
+        "Oval slots are present: drilling uses overlapping plunges (chain drilling), not "
+        "continuous milling, unless selected by the mill-drill threshold. The combined "
+        "single-diameter alternative always drills. Verify slot finish and tool suitability.\n"
+        if has_slots else ""
+    )
+    warning = WARNING + mode_warning + combined_warning + slot_warning
     (root / "REVIEW_BEFORE_MACHINING.txt").write_text(
         warning + "\npcb2gcode:\n" + version + "\n"
         + "\nCAM-only source toolpaths are in gcode/cam/.\n"

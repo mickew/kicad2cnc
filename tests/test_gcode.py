@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kicad2cnc.export import ExportError, export_board
-from kicad2cnc.gcode import generate_gcode, layer_file
+from kicad2cnc.gcode import _cam_drill_text, generate_gcode, layer_file
 from kicad2cnc.settings import CncSettings, find_converter
 
 
@@ -17,6 +17,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class GcodeTests(unittest.TestCase):
+    def test_cam_slot_translation_preserves_endpoints_tools_and_round_holes(self) -> None:
+        original = (
+            "M48\nMETRIC\nT1C0.8\n%\nG90\nG05\nT1\nX1.0Y2.0\n"
+            "G00X-3.0Y+4.5\nM15\nG01X-5.0Y+4.5\nM16\nG05\n"
+            "G00X6Y7\nM15\nG01X6Y8\nM16\nG05\nM30\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "slots.drl"
+            source.write_text(original, encoding="utf-8")
+            result = _cam_drill_text(source)
+            self.assertIn("X-3.0Y+4.5G85X-5.0Y+4.5\n", result)
+            self.assertIn("X6Y7G85X6Y8\n", result)
+            self.assertIn("T1C0.8", result)
+            self.assertIn("X1.0Y2.0\n", result)
+            self.assertEqual(source.read_text(encoding="utf-8"), original)
+            source.write_text(result, encoding="utf-8")
+            self.assertEqual(_cam_drill_text(source), result)
+
+    def test_unsupported_or_incomplete_route_blocks_fail_explicitly(self) -> None:
+        for route in (
+            "G00X1Y2\nM15\nG01X3Y4\nM16\n",
+            "G00X1Y2\nM15\nG02X3Y4I1J0\nM16\nG05\n",
+            "G00X1Y2\nM15\nG01X3Y4\nG01X5Y6\nM16\nG05\n",
+        ):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "slots.drl"
+                source.write_text(route, encoding="utf-8")
+                with self.assertRaisesRegex(ExportError, "Unsupported Excellon routing"):
+                    _cam_drill_text(source)
+
     def test_converter_failure_and_timeout_are_reported(self) -> None:
         for failure in ("exit", "timeout"):
             with tempfile.TemporaryDirectory() as directory:
@@ -240,7 +270,7 @@ class GcodeIntegrationTests(unittest.TestCase):
             self.assertIn("180-degree Y-axis flip", readme)
             self.assertIn("copper, component, edge, and clamp clearances are not checked", readme)
 
-    def test_single_diameter_alternative_rejects_slots_instead_of_omitting_them(self) -> None:
+    def test_slots_generate_normal_and_combined_drilling_with_back_only_mirroring(self) -> None:
         settings = replace(
             CncSettings(), isolation=False, outline=False,
             combined_drilling=True, combined_drill_diameter=0.6,
@@ -250,12 +280,61 @@ class GcodeIntegrationTests(unittest.TestCase):
             board = root / "slots.kicad_pcb"
             source = (ROOT / r"tests\fixtures\demo.kicad_pcb").read_text()
             board.write_text(source.replace("(drill 1.5)", "(drill oval 1.5 2.5)"))
-            with self.assertRaisesRegex(ExportError, "Routed Excellon slots are not supported"):
-                export_board(
-                    self.cli, board, root / "output", ("Edge.Cuts",),
+            for layers, sign in ((("F.Cu",), ""), (("B.Cu",), "-")):
+                result = export_board(
+                    self.cli, board, root / "output", layers,
                     convert=partial(generate_gcode, executable=self.converter, settings=settings),
                 )
-            self.assertEqual(list((root / "output").iterdir()), [])
+                with self.subTest(layers=layers):
+                    exported = next((result.directory / "drill").glob("*NPTH.drl")).read_text()
+                    self.assertIn("G00X25.0Y-14.5", exported)
+                    programs = tuple((result.directory / "gcode" / "grbl").glob("*.nc"))
+                    normal = next(path for path in programs if "drill-npth" in path.name)
+                    combined = next(path for path in programs if "drill-all-one-size" in path.name)
+                    for path in (normal, combined):
+                        text = path.read_text(encoding="ascii")
+                        for y in ("-14.50000", "-15.50000", "-15.00000"):
+                            self.assertIn(f"X{sign}25.00000 Y{y}", text)
+                        self.assertIn("Z-1.80000", text)
+                    self.assertIn("Tool: 1.5 mm", normal.read_text(encoding="ascii"))
+                    self.assertIn("Tool: 0.6 mm", combined.read_text(encoding="ascii"))
+                    cam = next((result.directory / "gcode" / "cam").glob("drill-*-NPTH/drill.drl"))
+                    self.assertIn("X25.0Y-14.5G85X25.0Y-15.5", cam.read_text())
+
+    def test_plated_slots_and_milldrilled_nonplated_slots(self) -> None:
+        settings = replace(
+            CncSettings(), isolation=False, outline=False,
+            milldrill_threshold=1.2, cutter_diameter=0.5,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            board = root / "slots.kicad_pcb"
+            source = (ROOT / r"tests\fixtures\demo.kicad_pcb").read_text()
+            board.write_text(
+                source.replace("(drill 1)", "(drill oval 2 1)")
+                .replace("(drill 1.5)", "(drill oval 1.5 2.5)")
+            )
+            result = export_board(
+                self.cli, board, root / "output", ("B.Cu",),
+                convert=partial(generate_gcode, executable=self.converter, settings=settings),
+            )
+            programs = tuple((result.directory / "gcode" / "grbl").glob("*.nc"))
+            plated = next(path for path in programs if "drill-pth-1mm" in path.name)
+            text = plated.read_text(encoding="ascii")
+            for x in ("-14.50000", "-15.50000"):
+                self.assertIn(f"X{x} Y-5.00000", text)
+            milled = next(path for path in programs if "milldrill-npth" in path.name)
+            code = re.sub(r"\([^)]*\)", "", milled.read_text(encoding="ascii"))
+            self.assertRegex(code, r"\bG[23]\b")
+            self.assertIn("Z-1.80000", code)
+            x_values = [float(value) for value in re.findall(r"\bX(-?[\d.]+)", code)]
+            y_values = [float(value) for value in re.findall(r"\bY(-?[\d.]+)", code)]
+            self.assertAlmostEqual(min(x_values), -25.5, places=4)
+            self.assertAlmostEqual(max(x_values), -24.5, places=4)
+            self.assertAlmostEqual(min(y_values), -15.5, places=4)
+            self.assertAlmostEqual(max(y_values), -14.5, places=4)
+            self.assertIn("G3 X-25.50000 Y-14.50000 I-0.50000 J0.00000", code)
+            self.assertIn("G3 X-24.50000 Y-15.50000 I0.50000 J0.00000", code)
 
     def test_back_only_mirrors_drills_and_outline_to_match_back_copper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -168,13 +168,21 @@ It is off by default and is saved with the board's CNC settings.
 
 **Run this program instead of the normal board drill/mill-drill files, not as an
 additional pass.** Every round hole is made with the selected bit, so the finished
-hole diameters differ from the design. Routed Excellon slots are not supported by
-this CAM pipeline; jobs containing them fail explicitly rather than omitting
-them. Use export-only mode and a slot-capable CAM tool for those boards.
+hole diameters differ from the design. Straight oval slots are included, using
+the selected diameter along the original slot centerline (so slot width and
+overall length also change). KiCad's straight slot route blocks are translated
+to equivalent G85 records in private CAM input copies; original Excellon exports
+remain unchanged. Other routed geometries fail explicitly rather than being omitted.
 Verify tool suitability, fit, clearances, and the complete toolpath.
 Registration holes remain separate at their configured diameter. Header-only
 drill exports are skipped; no combined program is produced if there are no board
 holes. Original Gerber/Excellon exports and normal CNC tool sizes are unchanged.
+
+For straight oval slots, the tested pcb2gcode build generates overlapping drill
+plunges along the slot unless the mill-drill threshold selects that slot's tool
+diameter for milling. Chain drilling is not continuous slot milling and can leave
+scalloped edges; verify the generated positions and tool suitability. The
+single-diameter alternative always uses drilling, not the mill-drill threshold.
 
 The converter receives `metric=true` **and** `metricoutput=true`, `zero-start=false`,
 `nog81=true`, `nog64=true`, and `nog91-1=true`. It uses the exported drill/place
