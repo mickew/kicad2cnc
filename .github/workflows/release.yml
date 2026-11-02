@@ -1,0 +1,111 @@
+name: Package and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version without v (for example 1.0.0)'
+        required: true
+        type: string
+      author:
+        description: Author display name for PCM metadata
+        required: true
+        default: 'Mikael Wågberg'
+        type: string
+      license:
+        description: Project license (exact SPDX identifier or license name)
+        required: true
+        default: 'GPL-2.0-or-later'
+        type: string
+      prerelease:
+        description: Mark the GitHub Release as a prerelease
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows plugin
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PACKAGE_VERSION: ${{ inputs.version }}
+      PACKAGE_AUTHOR: ${{ inputs.author }}
+      PACKAGE_LICENSE: ${{ inputs.license }}
+      PACKAGE_PRERELEASE: ${{ inputs.prerelease }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@v4
+
+      - name: Validate release inputs
+        run: |
+          if ($env:PACKAGE_VERSION -cnotmatch '^\d{1,4}(\.\d{1,4}(\.\d{1,6})?)?$') {
+              throw 'Version must be numeric major[.minor[.patch]], without a v prefix.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PACKAGE_AUTHOR) -or
+              [string]::IsNullOrWhiteSpace($env:PACKAGE_LICENSE)) {
+              throw 'Author and license must not be blank.'
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install test dependencies.' }
+
+      - name: Test package builder
+        run: |
+          python -m unittest discover -s tests -p test_package.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Package tests failed.' }
+
+      - name: Build ZIP and PCM metadata
+        run: |
+          $projectUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $downloadUrl = "$projectUrl/releases/download/v$env:PACKAGE_VERSION/kicad2cnc-$env:PACKAGE_VERSION.zip"
+          python .\tools\package.py `
+              --version "$env:PACKAGE_VERSION" `
+              --author "$env:PACKAGE_AUTHOR" `
+              --license "$env:PACKAGE_LICENSE" `
+              --project-url "$projectUrl" `
+              --download-url "$downloadUrl"
+          if ($LASTEXITCODE -ne 0) { throw 'Package creation failed.' }
+
+      - name: Create draft release and upload assets
+        run: |
+          $arguments = @(
+              'release', 'create', "v$env:PACKAGE_VERSION",
+              "dist\kicad2cnc-$env:PACKAGE_VERSION.zip", 'dist\metadata.json',
+              '--target', $env:GITHUB_SHA,
+              '--title', "KiCad to CNC $env:PACKAGE_VERSION",
+              '--generate-notes', '--draft'
+          )
+          if ($env:PACKAGE_PRERELEASE -eq 'true') { $arguments += '--prerelease' }
+          gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Release creation/upload failed. Existing releases are never overwritten; inspect any draft before retrying.'
+          }
+
+      - name: Publish completed release
+        run: |
+          gh release edit "v$env:PACKAGE_VERSION" --draft=false
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Publishing failed; inspect the draft release and its assets on GitHub.'
+          }

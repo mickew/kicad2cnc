@@ -222,6 +222,13 @@ the entire job; successful Gerber-only jobs remain independent of pcb2gcode.
 
 ## Development and validation
 
+The [Tests workflow](.github/workflows/tests.yml) runs the full suite on every
+push and pull request, and can also be started manually from GitHub Actions.
+It uses Windows, KiCad 10.0.7 (including its bundled Python), and pcb2gcode 2.4.0
+to exercise the GUI, packaging, and real export/CAM integration tests. CI fails
+on skipped tests as well as failures, so missing integration tools cannot pass
+as a successful full test run.
+
 KiCad's bundled Python includes wxPython but not a working Tkinter extension.
 The plugin declares `wxPython` explicitly for its isolated environment. The
 official IPC client distribution is **kicad-python**, imported as `kipy`.
@@ -281,6 +288,25 @@ archive SHA-256 and sizes and declares the IPC runtime and KiCad 10.0 minimum.
 Existing output files are never overwritten. The package is currently marked
 `testing` and Windows-only; PCM submission and controller certification are not
 performed by this tool.
+
+### Release from GitHub Actions
+
+After the workflow is on the default branch, open **Actions > Package and release >
+Run workflow**. Select the branch/revision to package and enter a numeric version
+without `v`, the author display name, and the project's actual license. The
+**prerelease** option is enabled by default.
+
+The [release workflow](.github/workflows/release.yml) tests the package builder,
+builds the ZIP and PCM metadata, and creates a GitHub Release tagged `v<version>`
+at the selected commit. Project and download URLs are filled in automatically
+for this repository. Both files are uploaded to a draft before it is published.
+Existing releases are not overwritten; if upload or publication fails, inspect
+any remaining draft before retrying.
+
+This workflow only runs manually and uses GitHub's built-in token; no additional
+secret is required. Run it against a revision whose full **Tests** workflow has
+passed: the release workflow itself only runs the packaging tests. The PCM
+metadata remains marked `testing`, even if GitHub's prerelease option is disabled.
 
 For a live connection check, enable the API server and open a board, then run:
 

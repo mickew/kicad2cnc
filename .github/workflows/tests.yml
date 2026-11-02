@@ -1,0 +1,73 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Windows full suite
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install KiCad 10.0.7
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'kicad-10.0.7-x86_64.exe'
+          Invoke-WebRequest 'https://github.com/KiCad/kicad-source-mirror/releases/download/10.0.7/kicad-10.0.7-x86_64.exe' -OutFile $installer
+          $expected = 'CE3881B6A9188EB34AC1EBAAEC7651149E8A025206410ADDFB11A1A9656ECF95'
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $expected) {
+              throw 'KiCad installer SHA256 mismatch.'
+          }
+          $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\KiCad\10.0'
+          $process = Start-Process -FilePath $installer -ArgumentList "/S /currentuser /D=$installDirectory" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+              throw "KiCad installation failed (exit $($process.ExitCode))."
+          }
+          $cli = Join-Path $installDirectory 'bin\kicad-cli.exe'
+          $python = Join-Path $installDirectory 'bin\python.exe'
+          $schema = Join-Path $installDirectory 'share\kicad\schemas\api.v1.schema.json'
+          foreach ($path in @($cli, $python, $schema)) {
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                  throw "Required KiCad file is missing: $path"
+              }
+          }
+          "KICAD_CLI=$cli" >> $env:GITHUB_ENV
+          "KICAD_PYTHON=$python" >> $env:GITHUB_ENV
+          "KICAD_API_SCHEMA=$schema" >> $env:GITHUB_ENV
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) { throw 'KiCad CLI could not run.' }
+
+      - name: Install pcb2gcode 2.4.0
+        run: |
+          .\tools\install-pcb2gcode.ps1
+          $converter = Join-Path $env:LOCALAPPDATA 'kicad2cnc\tools\pcb2gcode-2.4.0\pcb2gcode-2.4.0\pcb2gcode.exe'
+          if (-not (Test-Path -LiteralPath $converter -PathType Leaf)) {
+              throw "pcb2gcode executable is missing: $converter"
+          }
+          "PCB2GCODE=$converter" >> $env:GITHUB_ENV
+
+      - name: Install test dependencies
+        run: |
+          & $env:KICAD_PYTHON -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the test environment.' }
+          & .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install test dependencies.' }
+
+      - name: Run all tests (no skips allowed)
+        run: |
+          & .\.venv\Scripts\python.exe -m unittest discover -s tests -v 2>&1 |
+              Tee-Object -Variable testOutput
+          if ($LASTEXITCODE -ne 0) { throw 'Test suite failed.' }
+          if (($testOutput -join "`n") -match '\.\.\. skipped |OK \(skipped=') {
+              throw 'The full CI suite must run without skipped tests.'
+          }
