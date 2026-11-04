@@ -1,6 +1,7 @@
 # KiCad to CNC
 
 [![Package and release](https://github.com/mickew/kicad2cnc/actions/workflows/release.yml/badge.svg)](https://github.com/mickew/kicad2cnc/actions/workflows/release.yml)
+[![Tests](https://github.com/mickew/kicad2cnc/actions/workflows/tests.yml/badge.svg)](https://github.com/mickew/kicad2cnc/actions/workflows/tests.yml)
 
 IPC plugin for **KiCad 10.x**. Export selected Gerber layers and Excellon drills,
 optionally converting them to isolation, outline, and drilling G-code using
