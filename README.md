@@ -30,6 +30,8 @@ the KiCad plugin outside Windows has not been packaged or verified.
    (requires internet access).
 5. Click **KiCad to CNC** on the PCB Editor toolbar. The tooltip identifies the
    PCB-and-cutter icon. The action is also listed in the Plugins preferences.
+   The export window uses the PCB-and-cutter icon; CNC settings uses a gear icon
+   in its title bar where supported by the operating system.
 
 The plugin never modifies or saves your PCB. Save your board in KiCad before exports:
 KiCad 10's IPC API does not expose a dirty flag, so the dialog always displays a
@@ -79,6 +81,11 @@ file-function metadata when the standard filename is absent; custom filenames
 and the Gerber job file are preserved unchanged.
 
 Failed or incomplete exports show an error and do not publish a partial job.
+On Windows, temporary access/sharing errors when renaming the completed job
+folder are retried for up to five seconds and recorded in the export log. If
+publication still fails, close viewers or CNC senders using that directory,
+check output-directory permissions, or select another output directory and
+export again. Persistent permission errors are not bypassed.
 If the saved PCB changes during export, the job is rejected. Do not edit the
 board or project settings while exporting.
 
@@ -109,8 +116,16 @@ workholding first. No controller or physical machine has been tested.
    other builds are capability-checked but are not certified by these tests.
 2. Open **CNC settings...**. Choose the executable if needed, select operations,
    and set tool diameters, depths, feeds, spindle RPM, safe/tool-change Z, and tabs.
+   Hover over any setting or its label for an explanation, units and relevant
+   safety guidance. Export-layer, directory and export-only controls also have tooltips.
    For double-sided registration, enable **Registration** and enter 2-4
    symmetric hole centers in the exported drill/place-origin coordinates.
+   Set **Registration depth** separately from board drilling depth: use a negative
+   Z value in mm from the PCB top surface, for example `-3.0`. Verify the depth
+   needed for pin engagement and clearance below the board/into the spoilboard.
+   The plugin does not check that this reaches through the PCB. Existing saved
+   settings initially inherit their previous board-drill depth; subsequent changes
+   to board-drill depth do not change the saved registration depth.
    Values use **mm, mm/min, RPM**; Z=0 is the PCB top surface and cuts are negative.
    Defaults are examples, not recommendations for your machine or material.
    Settings are saved alongside the board as `<board>.kicad2cnc.json`.
@@ -183,6 +198,69 @@ plunges along the slot unless the mill-drill threshold selects that slot's tool
 diameter for milling. Chain drilling is not continuous slot milling and can leave
 scalloped edges; verify the generated positions and tool suitability. The
 single-diameter alternative always uses drilling, not the mill-drill threshold.
+
+### Optional bCNC manual tool-change programs
+
+In **CNC settings > Common**, enable **Also generate bCNC programs with manual
+tool changes (T/M6)**. This is off by default and saved with the board settings.
+Choose **bCNC program contents > All operations** (the default) or **Drills only**.
+Drills only includes board drilling, mill-drilling and enabled registration holes,
+but excludes copper isolation and outlines from the combined bCNC programs.
+Their individual programs are copied into `gcode\bcnc\` with a `separate-` filename
+prefix, so this folder contains all programs needed for the generated job.
+Run them separately following `README_bcnc.txt`, which lists their tools and
+front/back setup order. Enable drilling or registration for drills-only output; if neither
+produces holes, the job fails explicitly rather than producing an empty program.
+
+Board drill/mill-drill operations are sorted by ascending **tool diameter** across
+PTH and NPTH files, in both modes. Registration stays first for alignment; isolation
+and outline retain their normal setup order. Equal diameters retain their original
+order and still receive separate tool-change requests.
+
+Existing per-tool GRBL files remain unchanged. Additional programs and a tool
+list/setup guide are written to `gcode\bcnc\`:
+
+- Front-only job: `01-front.nc`, containing registration, board drill/mill-drill,
+  front isolation, and outline operations when enabled.
+- B.Cu-only job: `01-back-only.nc`, with matching mirrored drill, isolation, and
+  outline coordinates; machine B.Cu upward without flipping.
+- Double-sided job: `01-front.nc` for registration, board drills and front
+  isolation; `02-back.nc` for back isolation; `03-outline-front.nc` for outline
+  cutting last. Programs without operations are omitted.
+
+The folder also includes the machining-review warning. In **All operations**
+mode, operations already covered by combined programs are not copied again.
+In **Drills only** mode, combined drilling plus the copied isolation/outline
+programs form the complete job. Original GRBL files remain unchanged; do not
+run matching operations from both folders. Gerber/Excellon exports and raw CAM
+sources remain in their original locations, as they are not programs to run in bCNC.
+
+For double-sided work, stop between programs: use the verified Y-axis flip and
+re-establish G54 for the back program, then **return to the front-side setup and
+re-establish G54** before the outline program. A board flip is never handled as
+an M6 tool change. The outline stays in its original front coordinate frame.
+
+**Use bCNC programs instead of the corresponding separate tool files, not in addition.**
+They include normal board drill/mill-drill sizes; the single-diameter drill
+alternative is deliberately excluded to avoid drilling holes twice. Each
+operation requests a distinct tool number and M6, including the first tool
+and operations that happen to use the same diameter.
+
+These files are **bCNC-only**, not directly GRBL-compatible. In bCNC's tool-change
+settings select **Manual tool change (WCS)** or **Manual tool change (No Probe)**.
+Do not select ignore/skip M6, send M6 to the controller, or TLO mode. G49 cancels
+tool-length offsets in these programs. WCS probing must establish PCB-surface
+G54 Z0 for each tool; No Probe requires manually setting that Z0 before resuming.
+Verify bCNC's configured **machine-coordinate** tool-change/probe locations,
+homing, probe settings and safe travel; the plugin's work-coordinate change Z
+does not configure bCNC's macro locations.
+
+The spindle is stopped before each M6 and started after it with the configured
+spin-up dwell. Read `README_bcnc.txt`, check the listed tool diameters, inspect
+bCNC's compiled macros, simulate and dry-run before cutting. bCNC may add its
+own delays and movements. Actual sender/controller/probe hardware operation
+has not been tested; bCNC policies are described in its
+[tool-change implementation](https://github.com/vlachoudis/bCNC/blob/master/bCNC/CNC.py).
 
 The converter receives `metric=true` **and** `metricoutput=true`, `zero-start=false`,
 `nog81=true`, `nog64=true`, and `nog91-1=true`. It uses the exported drill/place
