@@ -1,4 +1,7 @@
 import unittest
+import tempfile
+from contextlib import chdir
+from dataclasses import fields
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -10,8 +13,9 @@ from pynng import Timeout, lib
 from kicad2cnc.board_info import BoardInfo
 from kicad2cnc.export import ExportResult
 from kicad2cnc.settings import CncSettings
+from kicad2cnc.ui import set_dialog_icon
 from kicad2cnc.ui.dialog import BoardInfoDialog
-from kicad2cnc.ui.settings_dialog import CncSettingsDialog
+from kicad2cnc.ui.settings_dialog import CncSettingsDialog, SETTING_TOOLTIPS
 
 
 class DialogTests(unittest.TestCase):
@@ -26,6 +30,83 @@ class DialogTests(unittest.TestCase):
         if self.dialog:
             self.dialog.Destroy()
         self.app.ProcessPendingEvents()
+
+    def test_dialogs_use_their_own_icons_from_any_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, chdir(directory):
+            with CncSettingsDialog(self.dialog, CncSettings()) as settings:
+                for dialog, filename in ((self.dialog, "cnc.png"), (settings, "settings.png")):
+                    icon = dialog.GetIcon()
+                    self.assertTrue(icon.IsOk())
+                    self.assertEqual((icon.Width, icon.Height), (32, 32))
+                    bitmap = wx.Bitmap()
+                    bitmap.CopyFromIcon(icon)
+                    image = bitmap.ConvertToImage()
+                    expected = wx.Image(
+                        str(Path(__file__).resolve().parents[1] / "icons" / filename),
+                        wx.BITMAP_TYPE_PNG,
+                    )
+                    actual_pixels = bytes(image.GetData())
+                    expected_pixels = bytes(expected.GetData())
+                    alpha = bytes(expected.GetAlpha())
+                    for pixel, opacity in enumerate(alpha):
+                        if opacity == 255:
+                            start = pixel * 3
+                            self.assertEqual(
+                                actual_pixels[start:start + 3], expected_pixels[start:start + 3],
+                            )
+
+    def test_invalid_dialog_icon_is_logged_without_blocking_dialog(self) -> None:
+        icon = Mock()
+        icon.IsOk.return_value = False
+        with (
+            patch("kicad2cnc.ui.wx.Icon", return_value=icon),
+            patch.object(self.dialog, "SetIcon") as set_icon,
+            self.assertLogs(level="ERROR") as messages,
+        ):
+            set_dialog_icon(self.dialog)
+        set_icon.assert_not_called()
+        self.assertIn("Could not load dialog icon", messages.output[0])
+
+    def test_all_cnc_settings_and_field_labels_have_explanatory_tooltips(self) -> None:
+        self.assertEqual(set(SETTING_TOOLTIPS), {field.name for field in fields(CncSettings)})
+        with CncSettingsDialog(self.dialog, CncSettings()) as settings:
+            controls = {
+                **settings.values,
+                **settings.operations,
+                "executable": settings.executable.GetTextCtrl(),
+                "bcnc_operations": settings.bcnc_operations,
+            }
+            self.assertEqual(set(controls), set(SETTING_TOOLTIPS))
+            for name, control in controls.items():
+                with self.subTest(setting=name):
+                    self.assertEqual(control.GetToolTipText(), SETTING_TOOLTIPS[name])
+                    self.assertGreater(len(control.GetToolTipText()), 40)
+            for control in (settings.executable.GetTextCtrl(), settings.executable.GetPickerCtrl()):
+                self.assertEqual(control.GetToolTipText(), SETTING_TOOLTIPS["executable"])
+            labels = set()
+            windows = list(settings.GetChildren())
+            while windows:
+                window = windows.pop()
+                windows.extend(window.GetChildren())
+                if isinstance(window, wx.StaticText) and window.GetToolTipText():
+                    labels.add(window.GetToolTipText())
+            for name in (*settings.values, "executable", "bcnc_operations"):
+                with self.subTest(label=name):
+                    self.assertIn(SETTING_TOOLTIPS[name], labels)
+            self.assertIn("PCB surface Z=0", settings.values["registration_depth"].GetToolTipText())
+            self.assertIn("instead", settings.operations["combined_drilling"].GetToolTipText())
+            self.assertIn("work coordinates", settings.values["change_z"].GetToolTipText())
+
+    def test_export_settings_have_tooltips_including_directory_picker_children(self) -> None:
+        for control in (
+            self.dialog.layers, self.dialog.output.GetTextCtrl(),
+            self.dialog.output.GetPickerCtrl(), self.dialog.export_only, self.dialog.settings_button,
+        ):
+            with self.subTest(control=type(control).__name__):
+                self.assertGreater(len(control.GetToolTipText()), 40)
+        self.assertIn("mirrors", self.dialog.layers.GetToolTipText())
+        self.assertIn("new job", self.dialog.output.GetTextCtrl().GetToolTipText())
+        self.assertIn("without pcb2gcode", self.dialog.export_only.GetToolTipText())
 
     def test_close_destroys_dialog_and_exits_event_loop(self) -> None:
         self.dialog.Show()
@@ -216,9 +297,12 @@ class DialogTests(unittest.TestCase):
             settings.values["bridge_count"].ChangeValue("6")
             settings.operations["outline"].SetValue(False)
             settings.operations["registration"].SetValue(True)
+            settings.operations["bcnc_tool_changes"].SetValue(True)
+            settings.bcnc_operations.SetSelection(1)
             settings.operations["combined_drilling"].SetValue(True)
             settings.values["combined_drill_diameter"].ChangeValue("0.6")
             settings.values["registration_hole_diameter"].ChangeValue("2.5")
+            settings.values["registration_depth"].ChangeValue("-3.5")
             settings.values["registration_positions"].ChangeValue("5, -2\n-5, -2")
             with patch.object(settings, "EndModal") as end:
                 settings.on_ok(Mock(spec=wx.CommandEvent))
@@ -227,9 +311,12 @@ class DialogTests(unittest.TestCase):
             self.assertEqual(settings.settings.bridge_count, 6)
             self.assertFalse(settings.settings.outline)
             self.assertTrue(settings.settings.registration)
+            self.assertTrue(settings.settings.bcnc_tool_changes)
+            self.assertEqual(settings.settings.bcnc_operations, "drills")
             self.assertTrue(settings.settings.combined_drilling)
             self.assertEqual(settings.settings.combined_drill_diameter, 0.6)
             self.assertEqual(settings.settings.registration_hole_diameter, 2.5)
+            self.assertEqual(settings.settings.registration_depth, -3.5)
             self.assertEqual(settings.settings.registration_positions, "5, -2\n-5, -2")
 
     def test_settings_dialog_rejects_invalid_values_without_closing(self) -> None:
@@ -243,6 +330,26 @@ class DialogTests(unittest.TestCase):
             end.assert_not_called()
             message.assert_called_once()
             self.assertEqual(settings.settings, CncSettings())
+
+    def test_bcnc_confirmation_requires_sender_policy_and_explicit_setup_changes(self) -> None:
+        info = self.load_saved_board()
+        self.dialog.export_only.SetValue(False)
+        self.dialog.cnc_settings = CncSettings(bcnc_tool_changes=True, bcnc_operations="drills")
+        with (
+            patch("kicad2cnc.ui.dialog.read_board_info", return_value=info),
+            patch("kicad2cnc.ui.dialog.wx.MessageBox", side_effect=[wx.YES, wx.NO]) as message,
+            patch("kicad2cnc.ui.dialog.find_converter", return_value=Path("converter")),
+            patch("kicad2cnc.ui.dialog.Thread") as thread,
+        ):
+            self.dialog.on_export()
+        confirmation = message.call_args_list[1].args[0]
+        self.assertIn("T/M6", confirmation)
+        self.assertIn("WCS or No Probe", confirmation)
+        self.assertIn("not TLO, skip, or send-to-GRBL", confirmation)
+        self.assertIn("returning to the front setup", confirmation)
+        self.assertIn("bCNC contents: drills only", confirmation)
+        self.assertIn("ascending diameter", confirmation)
+        thread.assert_not_called()
 
     def test_settings_load_failure_is_visible_and_blocks_conversion(self) -> None:
         info = BoardInfo(r"C:\boards\saved.kicad_pcb", ("F.Cu", "Edge.Cuts"), True, "10.0.7")

@@ -11,6 +11,8 @@ from kicad2cnc.registration import parse_registration_positions
 @dataclass(frozen=True)
 class CncSettings:
     executable: str = ""
+    bcnc_tool_changes: bool = False
+    bcnc_operations: str = "all"
     isolation: bool = True
     drilling: bool = True
     combined_drilling: bool = False
@@ -18,6 +20,7 @@ class CncSettings:
     outline: bool = True
     registration: bool = False
     registration_hole_diameter: float = 2.0
+    registration_depth: float = -1.8
     registration_positions: str = ""
     mill_diameter: float = 0.2
     isolation_width: float = 0.2
@@ -53,13 +56,21 @@ class CncSettings:
                     raise ValueError(f"CNC setting must be finite: {key}")
         if not any((self.isolation, self.drilling, self.outline, self.registration)):
             raise ValueError("Select at least one CNC operation.")
+        if self.bcnc_operations not in ("all", "drills"):
+            raise ValueError("bCNC operations must be all or drills.")
+        if self.bcnc_tool_changes and self.bcnc_operations == "drills" and not (
+            self.drilling or self.registration
+        ):
+            raise ValueError("Enable drilling or registration for drills-only bCNC output.")
         for name in (
             "mill_diameter", "mill_feed", "plunge_feed", "spindle", "safe_z",
             "change_z", "drill_feed", "cutter_diameter", "cut_infeed", "cut_feed",
         ):
             if values[name] <= 0:
                 raise ValueError(f"{name} must be greater than zero.")
-        if any(value >= 0 for value in (self.mill_depth, self.drill_depth, self.cut_depth)):
+        if any(value >= 0 for value in (
+            self.mill_depth, self.drill_depth, self.cut_depth, self.registration_depth,
+        )):
             raise ValueError("Cutting depths must be negative, relative to the PCB surface Z=0.")
         if not 0 <= self.overlap < 100:
             raise ValueError("Overlap must be at least 0 and less than 100 percent.")
@@ -95,6 +106,8 @@ def load_settings(board: Path) -> CncSettings:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or set(data) - {field.name for field in fields(CncSettings)}:
         raise ValueError(f"Invalid CNC settings file: {path}")
+    if "registration_depth" not in data:
+        data["registration_depth"] = data.get("drill_depth", CncSettings().drill_depth)
     settings = CncSettings(**data)
     settings.validate()
     return settings

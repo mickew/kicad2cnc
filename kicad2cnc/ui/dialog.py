@@ -12,6 +12,7 @@ from kicad2cnc.board_info import BoardInfo, read_board_info
 from kicad2cnc.export import ExportResult, export_board
 from kicad2cnc.gcode import generate_gcode
 from kicad2cnc.settings import CncSettings, find_converter, load_settings, save_settings
+from kicad2cnc.ui import set_dialog_icon
 from kicad2cnc.ui.settings_dialog import CncSettingsDialog
 
 
@@ -22,6 +23,7 @@ class BoardInfoDialog(wx.Dialog):
             title="KiCad to CNC - Board information",
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        set_dialog_icon(self)
         self.kicad = kicad
         self.info: BoardInfo | None = None
         self.exporting = False
@@ -47,6 +49,11 @@ class BoardInfoDialog(wx.Dialog):
         self.layer_label = wx.StaticText(self, label="Enabled layers")
         layout.Add(self.layer_label, 0, wx.LEFT | wx.RIGHT, 12)
         self.layers = wx.CheckListBox(self, size=(-1, 130))
+        self.layers.SetToolTip(
+            "Select Gerber layers to export. Isolation requires F.Cu and/or B.Cu; outline cutting "
+            "requires Edge.Cuts. Selecting B.Cu without F.Cu mirrors drills, outline and registration "
+            "to match back copper, so they can be machined in the same back-side setup."
+        )
         layout.Add(self.layers, 1, wx.EXPAND | wx.ALL, 12)
         self.notice = wx.StaticText(self, label="")
         self.notice.SetMinSize((560, 64))
@@ -56,12 +63,24 @@ class BoardInfoDialog(wx.Dialog):
             0, wx.LEFT | wx.RIGHT, 12,
         )
         self.output = wx.DirPickerCtrl(self, style=wx.DIRP_USE_TEXTCTRL)
+        self.output.SetToolTip(
+            "Absolute destination directory. Each export creates a new job subfolder with "
+            "Gerber/Excellon files and, when enabled, G-code and review instructions."
+        )
         layout.Add(self.output, 0, wx.EXPAND | wx.ALL, 12)
         mode = wx.BoxSizer(wx.HORIZONTAL)
         self.export_only = wx.CheckBox(self, label="Export only (no G-code)")
+        self.export_only.SetToolTip(
+            "Checked: export Gerber and Excellon files only, without pcb2gcode. "
+            "Unchecked: also generate CNC programs using the enabled CNC settings."
+        )
         self.export_only.SetValue(True)
         mode.Add(self.export_only, 0, wx.ALIGN_CENTER_VERTICAL)
         self.settings_button = wx.Button(self, label="CNC settings...")
+        self.settings_button.SetToolTip(
+            "Configure operations, tools, depths, feeds and optional bCNC output. "
+            "Accepted settings are saved beside the board; defaults are examples, not machining recommendations."
+        )
         self.settings_button.Bind(wx.EVT_BUTTON, self.on_settings)
         mode.Add(self.settings_button, 0, wx.LEFT, 12)
         layout.Add(mode, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -203,7 +222,7 @@ class BoardInfoDialog(wx.Dialog):
                 review_message = (
                     "Back copper is mirrored about X=0; for a double-sided job, the "
                     "matching physical flip is 180 degrees about the Y axis. Optional "
-                    "registration holes are manual through-holes, not a fixture or "
+                    "registration holes use their configured depth, not a fixture or "
                     "automatic alignment system; verify their clearance.\n\n"
                 )
             if cnc.combined_drilling:
@@ -212,6 +231,21 @@ class BoardInfoDialog(wx.Dialog):
                     "for ALL board holes, changing designed diameters. Run the combined file "
                     "INSTEAD OF normal board drill/mill-drill files, not in addition. "
                     "Registration holes remain separate.\n\n"
+                )
+            if cnc.bcnc_tool_changes:
+                review_message += (
+                    "Additional bCNC programs use T/M6 manual tool changes. Configure bCNC "
+                    "for manual WCS or No Probe tool changes (not TLO, skip, or send-to-GRBL), "
+                    "verify its machine-coordinate change/probe positions, and set/probe Z0 "
+                    "at every change. Board flips remain separate programs; double-sided "
+                    "outline cutting requires returning to the front setup. Use these programs "
+                    "INSTEAD OF separate tool files. Normal drill sizes are used.\n\n"
+                )
+                review_message += (
+                    f"bCNC contents: {'drills only' if cnc.bcnc_operations == 'drills' else 'all operations'}. "
+                    "Board drill/mill-drill tools run in ascending diameter; registration stays first. "
+                    "In drills-only mode, isolation and outline are copied to the bCNC folder "
+                    "as separate programs. Follow README_bcnc.txt for their setup order.\n\n"
                 )
             if wx.MessageBox(
                 "The exporter generates separate files for GRBL v1.1's supported command subset, "

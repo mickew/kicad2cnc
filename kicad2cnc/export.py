@@ -2,6 +2,7 @@ import hashlib
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,31 @@ def gerber_matches_layer(path: Path, layer: str) -> bool:
             if line.startswith("%FSL"):
                 break
     return False
+
+
+def _publish_job(stage: Path, destination: Path, log: list[str]) -> None:
+    for attempt in range(11):
+        try:
+            stage.rename(destination)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) not in (5, 32, 33):
+                raise ExportError(
+                    f"Could not publish completed job to {destination}: {error}"
+                ) from error
+            if attempt == 10:
+                raise ExportError(
+                    f"Windows blocked publication of the completed job to {destination} "
+                    f"after 5 seconds of retries: {error}\n"
+                    "Close any viewer or CNC sender using the export directory, check its "
+                    "write permissions, or choose another output directory and export again. "
+                    "No final job was published."
+                ) from error
+            log.append(
+                f"Windows blocked job-folder rename (error {error.winerror}); "
+                f"retrying publication ({attempt + 1}/10)."
+            )
+            time.sleep(0.5)
 
 
 def export_board(
@@ -110,7 +136,7 @@ def export_board(
             raise ExportError("The saved board changed during export. Export again without editing the board.")
         name = f"{board.stem}-{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
         destination = output / name
-        stage.rename(destination)
+        _publish_job(stage, destination, log)
     return ExportResult(
         destination,
         tuple(sorted(path for path in destination.rglob("*") if path.is_file())),

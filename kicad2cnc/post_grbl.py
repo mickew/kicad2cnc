@@ -1,4 +1,5 @@
 import re
+import shutil
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -206,6 +207,144 @@ def _operation(source: Path, cam_root: Path) -> tuple[str, int]:
     raise ExportError(f"Unrecognized CAM toolpath: {relative}")
 
 
+def _write_bcnc_programs(
+    gcode_root: Path,
+    operations: list[tuple[str, float, Path]],
+    *,
+    back_only: bool,
+    drills_only: bool,
+) -> None:
+    normal = [item for item in operations if item[0] != "drill-all-one-size"]
+    all_normal = normal
+    drill_operations = {"drill-pth", "drill-npth", "milldrill-pth", "milldrill-npth"}
+    if drills_only:
+        normal = [
+            item for item in normal
+            if item[0] in drill_operations or item[0] == "registration-drill"
+        ]
+    if not normal:
+        raise ExportError("No matching operations were generated for the selected bCNC program contents.")
+    normal = sorted(normal, key=lambda item: (
+        0 if item[0] == "registration-drill" else 1 if item[0] in drill_operations else 2,
+        item[1] if item[0] in drill_operations else 0,
+    ))
+    has_back = any(operation == "isolation-back" for operation, _, _ in normal)
+    setups: dict[str, list[tuple[str, float, Path]]] = {}
+    for item in normal:
+        operation = item[0]
+        if back_only:
+            setup = "01-back-only"
+        elif has_back:
+            setup = (
+                "02-back" if operation == "isolation-back"
+                else "03-outline-front" if operation == "outline"
+                else "01-front"
+            )
+        else:
+            setup = "01-front"
+        setups.setdefault(setup, []).append(item)
+
+    output = gcode_root / "bcnc"
+    output.mkdir()
+    guide = [
+        "KiCad to CNC - bCNC manual tool-change programs",
+        "",
+        "Use these INSTEAD OF the corresponding individual grbl tool files; do not run both.",
+        "Contents: drills only (including mill-drill and registration)." if drills_only
+        else "Contents: all generated operations.",
+        "Board drill/mill-drill tools are sorted by ascending tool diameter; registration stays first.",
+        "In drills-only mode, separate isolation/outline files are included in this folder.",
+        "Normal drill/mill-drill sizes are included. The single-size drill alternative",
+        "is excluded to prevent drilling the same holes twice.",
+        "These files contain T/M6 and MUST be run through bCNC, never sent directly to GRBL.",
+        "In bCNC select Manual tool change (WCS) or Manual tool change (No Probe).",
+        "Do NOT select Send M6, Ignore/Skip M6, or TLO mode.",
+        "Each operation has its own tool number even when diameters match.",
+        "Configure and verify bCNC's MACHINE-coordinate tool-change/probe positions,",
+        "homing, probe settings, and travel. Plugin change Z is a G54 work-coordinate height;",
+        "it does not configure bCNC's machine-coordinate tool-change height.",
+        "At every change install the listed tool and set/probe Z0 at the PCB surface.",
+        "WCS probing must establish the same PCB-surface G54 Z0 for every tool.",
+        "No Probe mode requires manual Z-zero before resuming. G49 cancels TLO.",
+        "Spindle is stopped before M6 and restarted after the configured spin-up dwell.",
+        "Simulate, verify bCNC's compiled tool-change macros, and dry-run before cutting.",
+        "Controller, machine, probing, and physical tool changes have not been tested.",
+        "",
+    ]
+    if back_only:
+        guide.append("B.Cu-up single-sided setup: matching X reflection; no board flip.")
+    elif has_back:
+        guide.extend([
+            "Run front operations first, then STOP and flip 180 degrees about the Y axis",
+            "using a verified fixture and re-establish G54 before running the back program.",
+            "If an outline program exists, STOP, return to the FRONT setup and re-establish",
+            "G54 before cutting the outline last. Never treat a board flip as a tool change.",
+        ])
+    else:
+        guide.append(
+            "Combined drilling uses the front-side setup; follow the complete machining order below."
+            if drills_only else "Front-side setup: no board flip is needed."
+        )
+    if drills_only:
+        remaining = [
+            item for item in all_normal
+            if item[0] not in drill_operations and item[0] != "registration-drill"
+        ]
+        guide.extend([
+            "",
+            "COMPLETE MACHINING ORDER (files in this folder only):",
+            "1. Run the combined drilling program listed below; registration is first.",
+            "2. Run any separate front-isolation files.",
+            *(
+                [
+                    "3. STOP, flip 180 degrees about the Y axis using a verified fixture,",
+                    "   and re-establish G54 before separate back-isolation files.",
+                    "4. STOP, return to the FRONT setup and re-establish G54 for outline last.",
+                ] if not back_only and any(item[0] == "isolation-back" for item in remaining)
+                else ["3. Run any remaining isolation files, then outline last; no flip is needed."]
+            ),
+            "Separate files do not contain M6: manually install the listed tool and",
+            "set/probe PCB-surface Z0 before each file. Never run matching files from grbl again.",
+            "",
+            "SEPARATE OPERATIONS:",
+        ])
+        for operation, diameter, source in remaining:
+            destination = output / f"separate-{source.name}"
+            shutil.copyfile(source, destination)
+            guide.append(f"{destination.name}: {operation}, {diameter:g} mm tool")
+    for setup, items in sorted(setups.items()):
+        lines = [
+            "(KiCad to CNC - bCNC ONLY; T/M6 requires manual tool-change handling.)",
+            "(ALTERNATIVE to corresponding individual GRBL files; never run both.)",
+            "(Contents: drills only; separate isolation/outline files are in this folder.)" if drills_only
+            else "(Contents: all generated operations for this setup.)",
+            f"(Setup: {setup}; verify orientation and G54 before starting.)",
+        ]
+        guide.extend(["", f"{setup}.nc:"])
+        for number, (operation, diameter, source) in enumerate(items, 1):
+            # Reuse the validated, reflected per-tool program, not raw CAM commands.
+            program = source.read_text(encoding="ascii").splitlines()
+            if program[-1] != "M30":
+                raise ExportError(f"Missing program end in {source.name}.")
+            program = program[:-1]
+            spindle_index = next(
+                (index for index, line in enumerate(program) if line.startswith("M3 S")), None,
+            )
+            if spindle_index is None:
+                raise ExportError(f"Missing spindle start in {source.name}.")
+            program[spindle_index:spindle_index] = [
+                f"T{number}",
+                f"M6 (T{number}: {operation}, {diameter:g} mm; set/probe PCB Z0)",
+                # bCNC's macro returns in G90; restore the other required modes too.
+                "G21", "G90", "G94", "G17", "G91.1", "G54", "G40",
+            ]
+            lines.extend(program)
+            guide.append(f"T{number}: {operation}, {diameter:g} mm ({source.name})")
+        lines.extend(["M30", ""])
+        (output / f"{setup}.nc").write_text("\n".join(lines), encoding="ascii")
+    (output / "README_bcnc.txt").write_text("\n".join(guide) + "\n", encoding="ascii")
+
+
 def postprocess_gcode(
     gcode_root: Path,
     settings: CncSettings,
@@ -236,6 +375,7 @@ def postprocess_gcode(
     output = gcode_root / "grbl"
     output.mkdir()
     files: list[Path] = []
+    operations: list[tuple[str, float, Path]] = []
     manifest: list[str] = []
     sequence = 0
     for toolpath in ordered:
@@ -303,6 +443,7 @@ def postprocess_gcode(
                 encoding="ascii",
             )
             files.append(destination)
+            operations.append((toolpath.operation, tool.diameter, destination))
             alternative = "ALTERNATIVE ONLY - " if toolpath.operation == "drill-all-one-size" else ""
             manifest.append(
                 f"{sequence:02d}. {alternative}{destination.name} — {toolpath.operation}, "
@@ -311,7 +452,9 @@ def postprocess_gcode(
 
     registration_notes = (
         [
-            "The first file drills the configured through-PCB registration holes.",
+            f"The first file drills registration holes to Z{settings.registration_depth:g} mm "
+            "relative to the PCB surface.",
+            "Verify sufficient depth for the intended registration pins and clearance below the PCB.",
             "They must be symmetric about X=0 for the 180-degree Y-axis flip.",
             "Their copper, component, edge, and clamp clearances are not checked.",
             "Manually inspect their positions before machining.",
@@ -402,4 +545,14 @@ def postprocess_gcode(
         *manifest,
     ]
     (output / "README_job.txt").write_text("\n".join(readme) + "\n", encoding="utf-8")
+    if settings.bcnc_tool_changes:
+        _write_bcnc_programs(
+            gcode_root, operations, back_only=mirror_non_copper_x,
+            drills_only=settings.bcnc_operations == "drills",
+        )
+        with (output / "README_job.txt").open("a", encoding="utf-8") as guide:
+            guide.write(
+                "\nOptional bCNC T/M6 programs are in ../bcnc. Use them INSTEAD OF corresponding tool files.\n"
+                "Follow ../bcnc/README_bcnc.txt for setup order and bCNC tool-change policy.\n"
+            )
     return tuple(files)

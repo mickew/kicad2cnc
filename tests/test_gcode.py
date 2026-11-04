@@ -250,6 +250,8 @@ class GcodeIntegrationTests(unittest.TestCase):
             CncSettings(),
             registration=True,
             registration_hole_diameter=2.0,
+            registration_depth=-3.2,
+            bcnc_tool_changes=True,
             registration_positions="0, -5\n0, -15",
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -265,8 +267,19 @@ class GcodeIntegrationTests(unittest.TestCase):
             self.assertIn("Tool: 2 mm", text)
             self.assertIn("X0.00000 Y-5.00000", text)
             self.assertIn("X0.00000 Y-15.00000", text)
+            self.assertIn("Z-3.20000", text)
+            self.assertNotIn("Z-1.80000", text)
+            config = (job / "gcode" / "cam" / "drill-registration-PTH" / "millproject").read_text()
+            self.assertIn("zdrill=-3.2", config)
+            bcnc = (job / "gcode" / "bcnc" / "01-front.nc").read_text()
+            self.assertIn("Z-3.20000", bcnc)
+            self.assertIn("Z-1.80000", bcnc)
+            board_drill = next((job / "gcode" / "grbl").glob("*drill-pth*.nc")).read_text()
+            self.assertIn("Z-1.80000", board_drill)
+            self.assertNotIn("Z-3.20000", board_drill)
             readme = (job / "gcode" / "grbl" / "README_job.txt").read_text(encoding="utf-8")
             self.assertIn("Drill registration holes first", readme)
+            self.assertIn("Z-3.2 mm", readme)
             self.assertIn("180-degree Y-axis flip", readme)
             self.assertIn("copper, component, edge, and clamp clearances are not checked", readme)
 
@@ -396,12 +409,99 @@ class GcodeIntegrationTests(unittest.TestCase):
                 [path.name for path in (gcode / "grbl").glob("*.nc")],
                 ["01-isolation-front-0p2mm.nc"],
             )
+            self.assertFalse((gcode / "bcnc").exists())
+
+    def test_actual_bcnc_programs_preserve_operations_and_mirrored_coordinates(self) -> None:
+        settings = replace(
+            CncSettings(), bcnc_tool_changes=True, combined_drilling=True,
+            combined_drill_diameter=0.6, registration=True,
+            registration_positions="0,-5\n0,-15", milldrill_threshold=1.2, cutter_diameter=0.5,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for layers, expected in (
+                (("F.Cu", "Edge.Cuts"), ["01-front.nc"]),
+                (("B.Cu", "Edge.Cuts"), ["01-back-only.nc"]),
+                (("F.Cu", "B.Cu", "Edge.Cuts"),
+                 ["01-front.nc", "02-back.nc", "03-outline-front.nc"]),
+            ):
+                with self.subTest(layers=layers):
+                    job = self.export(Path(directory), settings, layers)
+                    bcnc = sorted((job / "gcode" / "bcnc").glob("*.nc"))
+                    self.assertEqual([path.name for path in bcnc], expected)
+                    all_text = "\n".join(path.read_text(encoding="ascii") for path in bcnc)
+                    self.assertNotIn("drill-all-one-size", all_text)
+                    for path in (job / "gcode" / "grbl").glob("*.nc"):
+                        if "drill-all-one-size" in path.name:
+                            continue
+                        source = path.read_text(encoding="ascii")
+                        # Every original motion block survives composition exactly once.
+                        for line in source.splitlines():
+                            if re.match(r"G[0123] .*", line):
+                                self.assertIn(line, all_text)
+                    for path in bcnc:
+                        text = path.read_text(encoding="ascii")
+                        self.assertEqual(text.count("\nM30\n"), 1)
+                        self.assertEqual(len(re.findall(r"^M6 ", text, re.MULTILINE)),
+                                         text.count("M3 S10000"))
+                    self.assertIn("milldrill-npth", all_text)
+                    self.assertIn("Tool: 0.8 mm", all_text)
+                    self.assertIn("Tool: 1 mm", all_text)
+                    x = "-5" if layers[0] == "B.Cu" else "5"
+                    self.assertIn(f"X{x}.00000 Y-5.00000", all_text)
 
     def test_converter_nonzero_exit_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with patch("kicad2cnc.gcode.subprocess.Popen", side_effect=OSError("Cannot start")):
                 with self.assertRaisesRegex(ExportError, "Could not launch"):
                     generate_gcode(Path(directory), self.converter, CncSettings())
+
+    def test_actual_bcnc_drills_only_excludes_routing_and_sorts_sizes(self) -> None:
+        settings = replace(
+            CncSettings(), bcnc_tool_changes=True, bcnc_operations="drills",
+            registration=True, registration_positions="0,-5\n0,-15",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for layers, filename, sign in (
+                (("F.Cu", "B.Cu", "Edge.Cuts"), "01-front.nc", ""),
+                (("B.Cu", "Edge.Cuts"), "01-back-only.nc", "-"),
+            ):
+                with self.subTest(layers=layers):
+                    job = self.export(Path(directory), settings, layers)
+                    programs = tuple(
+                        path for path in (job / "gcode" / "bcnc").glob("*.nc")
+                        if not path.name.startswith("separate-")
+                    )
+                    self.assertEqual([path.name for path in programs], [filename])
+                    text = programs[0].read_text(encoding="ascii")
+                    sizes = re.findall(r"^M6 \(T\d+: [^,]+, ([\d.]+) mm;", text, re.MULTILINE)
+                    self.assertEqual([float(size) for size in sizes], [2.0, 0.8, 1.0, 1.5])
+                    self.assertNotIn("Operation: isolation", text)
+                    self.assertNotIn("Operation: outline", text)
+                    self.assertIn(f"X{sign}5.00000 Y-5.00000", text)
+                    self.assertIn(f"X{sign}25.00000 Y-15.00000", text)
+                    grbl = list((job / "gcode" / "grbl").glob("*.nc"))
+                    self.assertTrue(any("outline" in path.name for path in grbl))
+                    self.assertTrue(any("isolation" in path.name for path in grbl))
+                    folder = job / "gcode" / "bcnc"
+                    copied = list(folder.glob("separate-*.nc"))
+                    expected = [
+                        path for path in grbl if "isolation" in path.name or "outline" in path.name
+                    ]
+                    self.assertEqual(len(copied), len(expected))
+                    guide = (folder / "README_bcnc.txt").read_text()
+                    for source in expected:
+                        copy = folder / f"separate-{source.name}"
+                        self.assertEqual(copy.read_bytes(), source.read_bytes())
+                        self.assertIn(copy.name, guide)
+                    self.assertEqual(
+                        (folder / "REVIEW_BEFORE_MACHINING.txt").read_bytes(),
+                        (job / "gcode" / "REVIEW_BEFORE_MACHINING.txt").read_bytes(),
+                    )
+                    self.assertEqual(list(folder.glob("*drill-pth*.nc")), [])
+                    if sign == "":
+                        self.assertIn("return to the FRONT setup", guide)
+                    else:
+                        self.assertIn("no flip is needed", guide)
 
 
 if __name__ == "__main__":

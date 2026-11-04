@@ -14,7 +14,7 @@ WARNING = (
     "GRBL v1.1 FILES - REVIEW AND SIMULATION REQUIRED\n"
     "Syntax is post-processed for GRBL v1.1; your controller and machine are not verified.\n"
     "Files are separate manual tool operations. Set the tool and Z0 again for each file.\n"
-    "Registration holes are optional manual through-holes; inspect their clearances and fit.\n"
+    "Registration holes use a separate configured depth; inspect their clearances and fit.\n"
     "Automatic placement and fixture alignment are not provided.\n"
     "Z=0 is the PCB top surface. Check origin, units, depths, travel, spindle, tabs,\n"
     "workholding, and front/back alignment. Simulate, GRBL-check, and dry-run before cutting.\n"
@@ -251,7 +251,7 @@ def generate_gcode(
         registration_options: dict[str, str | float | int] = {
             **cut_options,
             "drill-side": "front",
-            "zdrill": settings.drill_depth,
+            "zdrill": settings.registration_depth,
             "drill-feed": settings.drill_feed,
             "drill-speed": settings.spindle,
         }
@@ -288,13 +288,27 @@ def generate_gcode(
         "single-diameter alternative always drills. Verify slot finish and tool suitability.\n"
         if has_slots else ""
     )
-    warning = WARNING + mode_warning + combined_warning + slot_warning
+    bcnc_warning = (
+        "Additional bCNC T/M6 programs are in gcode/bcnc; use INSTEAD OF corresponding individual files. "
+        "Configure manual WCS or No Probe policy, not skip/send M6 or TLO. Verify machine "
+        "change/probe positions and Z0 at every change. Read README_bcnc.txt for flip/setup "
+        "order; double-sided outline requires returning to the front setup. "
+        f"bCNC contents: {settings.bcnc_operations}; board drills sorted by ascending tool diameter "
+        "(registration first). Drills-only combined programs exclude isolation and outline; "
+        "their separate files are copied into the bCNC folder.\n"
+        if settings.bcnc_tool_changes else ""
+    )
+    warning = WARNING + mode_warning + combined_warning + slot_warning + bcnc_warning
     (root / "REVIEW_BEFORE_MACHINING.txt").write_text(
         warning + "\npcb2gcode:\n" + version + "\n"
         + "\nCAM-only source toolpaths are in gcode/cam/.\n"
         + f"Post-processed GRBL files are in gcode/grbl/ ({len(grbl_files)} separate tool files).\n",
         encoding="utf-8",
     )
+    if settings.bcnc_tool_changes:
+        (root / "bcnc" / "REVIEW_BEFORE_MACHINING.txt").write_bytes(
+            (root / "REVIEW_BEFORE_MACHINING.txt").read_bytes(),
+        )
     text = "\n".join(logs)
     (root / "conversion.log").write_text(text, encoding="utf-8")
     return warning + "\n" + text

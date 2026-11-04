@@ -5,13 +5,52 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kicad2cnc.export import ExportError, export_board
+from kicad2cnc.export import ExportError, _publish_job, export_board
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExportTests(unittest.TestCase):
+    def test_publication_retries_transient_windows_locks_and_logs_them(self) -> None:
+        for code in (5, 32, 33):
+            error = PermissionError("Folder locked")
+            error.winerror = code
+            with (
+                self.subTest(code=code),
+                patch.object(Path, "rename", side_effect=[error, error, None]) as rename,
+                patch("kicad2cnc.export.time.sleep") as sleep,
+            ):
+                log: list[str] = []
+                _publish_job(Path("stage"), Path("destination"), log)
+                self.assertEqual(rename.call_count, 3)
+                self.assertEqual(sleep.call_count, 2)
+                self.assertEqual(len(log), 2)
+                self.assertIn(f"error {code}", log[0])
+
+    def test_persistent_publication_lock_fails_and_no_job_is_published(self) -> None:
+        error = PermissionError("Folder locked")
+        error.winerror = 5
+        with (
+            patch("kicad2cnc.export.subprocess.run", side_effect=self.fake_run),
+            patch.object(Path, "rename", side_effect=error) as rename,
+            patch("kicad2cnc.export.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(ExportError, "after 5 seconds of retries"):
+                export_board(self.cli, self.board, self.output, self.layers)
+        self.assertEqual(rename.call_count, 11)
+        self.assertEqual(sleep.call_count, 10)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_publication_does_not_retry_other_errors_or_overwrite_existing_jobs(self) -> None:
+        with (
+            patch.object(Path, "rename", side_effect=FileExistsError("Destination exists")),
+            patch("kicad2cnc.export.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(ExportError, "Could not publish completed job"):
+                _publish_job(Path("stage"), Path("destination"), [])
+        sleep.assert_not_called()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="cnc tests with spaces ")
         self.addCleanup(self.temp.cleanup)
