@@ -1,7 +1,10 @@
 # KiCad to CNC
 
-[![Package and release](https://github.com/mickew/kicad2cnc/actions/workflows/release.yml/badge.svg)](https://github.com/mickew/kicad2cnc/actions/workflows/release.yml)
+[![Release](https://github.com/mickew/kicad2cnc/actions/workflows/release.yml/badge.svg)](https://github.com/mickew/kicad2cnc/actions/workflows/release.yml)
 [![Tests](https://github.com/mickew/kicad2cnc/actions/workflows/tests.yml/badge.svg)](https://github.com/mickew/kicad2cnc/actions/workflows/tests.yml)
+[![Latest GitHub release version](https://img.shields.io/github/v/release/mickew/kicad2cnc?logo=semanticrelease&label=Release)](https://github.com/mickew/kicad2cnc/release/latest)
+[![Latest GitHub release version, including prereleases](https://img.shields.io/github/v/release/mickew/kicad2cnc?logo=semanticrelease&include_prereleases&label=Prerelease)](https://github.com/mickew/kicad2cnc/releases)
+
 
 IPC plugin for **KiCad 10.x**. Export selected Gerber layers and Excellon drills,
 optionally converting them to isolation, outline, and drilling G-code using
@@ -389,6 +392,7 @@ The [release workflow](.github/workflows/release.yml) tests the package builder,
 builds the ZIP and PCM metadata, and creates a GitHub Release tagged `v<version>`
 at the selected commit. Project and download URLs are filled in automatically
 for this repository. Both files are uploaded to a draft before it is published.
+Non-prereleases are explicitly marked **Latest**; prereleases are not.
 Existing releases are not overwritten; if upload or publication fails, inspect
 any remaining draft before retrying.
 
