@@ -320,6 +320,11 @@ It uses Windows, KiCad 10.0.7 (including its bundled Python), and pcb2gcode 2.4.
 to exercise the GUI, packaging, and real export/CAM integration tests. CI fails
 on skipped tests as well as failures, so missing integration tools cannot pass
 as a successful full test run.
+The workflow measures Python line and branch coverage for `kicad2cnc`, displays
+a summary on the workflow run, and uploads a **coverage-report** artifact with
+HTML and Cobertura XML reports. Download and extract it, then open
+`html/index.html` to inspect covered and missing code. Reports are also attempted
+when tests fail. Coverage does not measure the external KiCad/pcb2gcode binaries.
 
 KiCad's bundled Python includes wxPython but not a working Tkinter extension.
 The plugin declares `wxPython` explicitly for its isolated environment. The
@@ -330,6 +335,20 @@ official IPC client distribution is **kicad-python**, imported as `kipy`.
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+To generate the same coverage reports locally after installing the development
+dependencies:
+
+```powershell
+.\.venv\Scripts\python.exe -m coverage run -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m coverage report
+.\.venv\Scripts\python.exe -m coverage html
+.\.venv\Scripts\python.exe -m coverage xml
+Start-Process .\coverage-report\html\index.html
+```
+
+Generated coverage data and reports are ignored by Git. Local integration tests
+may skip if external tools are missing; CI still requires no skipped tests.
 
 For VS Code, select `.venv\Scripts\python.exe`, enable unittest and discover
 `test_*.py` in `tests`. The `tests/__init__.py` package marker supports discovery

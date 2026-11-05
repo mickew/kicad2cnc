@@ -65,9 +65,30 @@ jobs:
 
       - name: Run all tests (no skips allowed)
         run: |
-          & .\.venv\Scripts\python.exe -m unittest discover -s tests -v 2>&1 |
+          & .\.venv\Scripts\python.exe -m coverage run -m unittest discover -s tests -v 2>&1 |
               Tee-Object -Variable testOutput
           if ($LASTEXITCODE -ne 0) { throw 'Test suite failed.' }
           if (($testOutput -join "`n") -match '\.\.\. skipped |OK \(skipped=') {
               throw 'The full CI suite must run without skipped tests.'
           }
+
+      - name: Generate coverage reports
+        if: ${{ always() && hashFiles('.coverage') != '' }}
+        run: |
+          & .\.venv\Scripts\python.exe -m coverage html
+          if ($LASTEXITCODE -ne 0) { throw 'HTML coverage report failed.' }
+          & .\.venv\Scripts\python.exe -m coverage xml
+          if ($LASTEXITCODE -ne 0) { throw 'XML coverage report failed.' }
+          $report = & .\.venv\Scripts\python.exe -m coverage report
+          if ($LASTEXITCODE -ne 0) { throw 'Coverage summary failed.' }
+          $report
+          @('## Python code coverage', '', '```text') + $report + @('```') |
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage reports
+        if: ${{ always() && hashFiles('coverage-report/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/
+          if-no-files-found: error

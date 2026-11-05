@@ -1,0 +1,13 @@
+[run]
+branch = True
+source = kicad2cnc
+relative_files = True
+
+[report]
+show_missing = True
+
+[html]
+directory = coverage-report/html
+
+[xml]
+output = coverage-report/coverage.xml
