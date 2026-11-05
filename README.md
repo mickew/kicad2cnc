@@ -331,6 +331,10 @@ official IPC client distribution is **kicad-python**, imported as `kipy`.
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+For VS Code, select `.venv\Scripts\python.exe`, enable unittest and discover
+`test_*.py` in `tests`. The `tests/__init__.py` package marker supports discovery
+from the project root as used by VS Code's Python test adapter.
+
 Tests use the real SDK types with mocked IPC replies and exercise the wx dialog,
 including failed refreshes, export confirmation, worker errors, and closing.
 The export tests also run the real CLI against a two-sided fixture with plated
