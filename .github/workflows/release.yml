@@ -105,7 +105,13 @@ jobs:
 
       - name: Publish completed release
         run: |
-          gh release edit "v$env:PACKAGE_VERSION" --draft=false
+          $arguments = @('release', 'edit', "v$env:PACKAGE_VERSION", '--draft=false')
+          if ($env:PACKAGE_PRERELEASE -eq 'true') {
+              $arguments += '--latest=false'
+          } else {
+              $arguments += '--latest'
+          }
+          gh @arguments
           if ($LASTEXITCODE -ne 0) {
               throw 'Publishing failed; inspect the draft release and its assets on GitHub.'
           }
